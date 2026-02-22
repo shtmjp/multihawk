@@ -1,0 +1,19 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v2.4.0
+    hooks:
+      - id: check-added-large-files
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: bash -c "maturin develop && uv run pytest"
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: cargo_test
+        name: cargo_test
+        entry: bash -c "cd rust && cargo test"
+        language: system
+        pass_filenames: false
+        always_run: true
