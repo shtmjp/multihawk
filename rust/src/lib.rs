@@ -9,7 +9,7 @@ use pp_data::MultivariatePPData;
 mod simulate;
 use simulate::{simulate_hawkes_branching_with_baseline, ImmigrantSamplingMethod};
 mod kernel;
-use kernel::{ExpKernel, GammaKernel, KernelKind, MixedExpKernel, PowerLawKernel};
+use kernel::{ExpKernel, GammaKernel, KernelKind, LaggedExpKernel, MixedExpKernel, PowerLawKernel};
 
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -145,6 +145,19 @@ fn kernel_from_object(py: Python<'_>, obj: PyObject) -> PyResult<KernelKind> {
                 .ok_or_else(|| PyValueError::new_err("kernel params must include 'beta'"))?
                 .extract()?;
             Ok(KernelKind::Exponential(ExpKernel::new(beta)))
+        }
+        "lagged_exponential" => {
+            let beta: Vec<Vec<f64>> = params
+                .get_item("beta")?
+                .ok_or_else(|| PyValueError::new_err("kernel params must include 'beta'"))?
+                .extract()?;
+            let tau: Vec<Vec<f64>> = params
+                .get_item("tau")?
+                .ok_or_else(|| PyValueError::new_err("kernel params must include 'tau'"))?
+                .extract()?;
+            LaggedExpKernel::new(beta, tau)
+                .map(KernelKind::LaggedExponential)
+                .map_err(PyValueError::new_err)
         }
         "gamma" => {
             let shape: Vec<Vec<f64>> = params

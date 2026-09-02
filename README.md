@@ -59,6 +59,8 @@ Baseline specifications accept the following `kind` values:
 Kernel specifications currently support:
 
 - `"exponential"`: exponential decay per interaction pair.
+- `"lagged_exponential"`: exponential decay beginning after a deterministic
+  non-negative lag for each interaction pair.
 - `"gamma"`: gamma-distributed triggering with configurable shape and rate.
 - `"mixed_exponential"`: mixtures of exponential components for each pair.
 
@@ -81,6 +83,36 @@ alpha = [[0.2, 0.1], [0.0, 0.1]]
 
 result_exp = simulate_hawkes(t_max=50.0, baseline=baseline, alpha=alpha, kernel=kernel, rng=rng)
 print(result_exp.timestamps)
+```
+
+For a lagged exponential kernel, `tau[parent][child]` is the deterministic
+delay before the exponential triggering density begins. Matrix entries in
+`alpha`, `beta`, and `tau` all use the `[parent][child]` convention. For a
+source/parent component `j` triggering a target/child component `i`:
+
+\[
+\phi_{j\to i}(u)
+= \alpha_{ji}\,\beta_{ji}
+  \exp\{-\beta_{ji}(u-\tau_{ji})\}
+  \mathbf{1}\{u>\tau_{ji}\}.
+\]
+
+```python
+kernel = KernelSpec(
+    kind="lagged_exponential",
+    params={
+        "beta": [[2.0, 3.0], [1.0, 2.5]],
+        "tau": [[0.10, 0.35], [0.25, 0.15]],
+    },
+)
+
+result_lagged = simulate_hawkes(
+    t_max=50.0,
+    baseline=baseline,
+    alpha=alpha,
+    kernel=kernel,
+    rng=np.random.default_rng(0),
+)
 ```
 
 For a gamma kernel, adjust the kernel specification:

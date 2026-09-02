@@ -24,6 +24,34 @@ def _to_float_tensor(
     return [_to_float_matrix(matrix) for matrix in tensor]
 
 
+def _exponential_kernel_backend(
+    kind: Literal["exponential", "lagged_exponential"],
+    params: Mapping[str, Any],
+) -> dict[str, Any]:
+    if "beta" not in params:
+        if kind == "exponential":
+            msg = "KernelSpec for 'exponential' requires 'beta'"
+        else:
+            msg = "KernelSpec for 'lagged_exponential' requires 'beta' and 'tau'"
+        raise ValueError(msg)
+
+    beta = params["beta"]
+    if kind == "exponential":
+        return {"kind": kind, "params": {"beta": _to_float_matrix(beta)}}
+
+    if "tau" not in params:
+        msg = "KernelSpec for 'lagged_exponential' requires 'beta' and 'tau'"
+        raise ValueError(msg)
+    tau = params["tau"]
+    return {
+        "kind": kind,
+        "params": {
+            "beta": _to_float_matrix(beta),
+            "tau": _to_float_matrix(tau),
+        },
+    }
+
+
 @dataclass
 class BaselineSpec:
     """Specification for non-homogeneous baseline intensities."""
@@ -76,17 +104,19 @@ class BaselineSpec:
 class KernelSpec:
     """Specification for triggering kernels."""
 
-    kind: Literal["exponential", "gamma", "mixed_exponential", "power_law"]
+    kind: Literal[
+        "exponential",
+        "lagged_exponential",
+        "gamma",
+        "mixed_exponential",
+        "power_law",
+    ]
     params: Mapping[str, Any]
 
     def to_backend(self) -> dict[str, Any]:
         """Convert to a dictionary suitable for the Rust backend."""
-        if self.kind == "exponential":
-            if "beta" not in self.params:
-                msg = "KernelSpec for 'exponential' requires 'beta'"
-                raise ValueError(msg)
-            beta = self.params["beta"]
-            return {"kind": self.kind, "params": {"beta": _to_float_matrix(beta)}}
+        if self.kind in {"exponential", "lagged_exponential"}:
+            return _exponential_kernel_backend(self.kind, self.params)
 
         if self.kind == "gamma":
             if "shape" not in self.params or "rate" not in self.params:

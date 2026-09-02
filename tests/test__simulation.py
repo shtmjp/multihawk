@@ -22,6 +22,169 @@ def test_simulate_hawkes_exponential_reproducible() -> None:
     assert all(all(0.0 <= t <= t_max for t in ts) for ts in result1.timestamps)
 
 
+def test_simulate_hawkes_lagged_exponential_reproducible() -> None:
+    """Check reproducibility and bounds for the lagged exponential kernel."""
+    baseline = BaselineSpec(kind="constant", params={"values": [0.3, 0.2]})
+    kernel = KernelSpec(
+        kind="lagged_exponential",
+        params={
+            "beta": [[2.0, 1.5], [1.2, 2.5]],
+            "tau": [[0.1, 0.4], [0.2, 0.3]],
+        },
+    )
+    alpha = [[0.2, 0.1], [0.05, 0.15]]
+    t_max = 100.0
+    result1 = simulate_hawkes(
+        t_max=t_max,
+        baseline=baseline,
+        alpha=alpha,
+        kernel=kernel,
+        rng=np.random.default_rng(20260901),
+    )
+    result2 = simulate_hawkes(
+        t_max=t_max,
+        baseline=baseline,
+        alpha=alpha,
+        kernel=kernel,
+        rng=np.random.default_rng(20260901),
+    )
+    assert result1.timestamps == result2.timestamps
+    assert result1.obs_window == (0.0, t_max)
+    assert all(all(0.0 <= t <= t_max for t in ts) for ts in result1.timestamps)
+
+
+def test_lagged_exponential_integer_seed_reproducible() -> None:
+    """The integer-seed API is reproducible for the lagged kernel."""
+    baseline = BaselineSpec(kind="constant", params={"values": [0.3, 0.2]})
+    kernel = KernelSpec(
+        kind="lagged_exponential",
+        params={
+            "beta": [[2.0, 1.5], [1.2, 2.5]],
+            "tau": [[0.1, 0.4], [0.2, 0.3]],
+        },
+    )
+    simulation_kwargs = {
+        "t_max": 100.0,
+        "baseline": baseline,
+        "alpha": [[0.2, 0.1], [0.05, 0.15]],
+        "kernel": kernel,
+        "seed": 20260901,
+    }
+    result1 = simulate_hawkes(**simulation_kwargs)
+    result2 = simulate_hawkes(**simulation_kwargs)
+    assert result1 == result2
+
+
+def test_zero_lag_matches_exponential_kernel() -> None:
+    """A zero-lag kernel consumes the same random stream as the exponential kernel."""
+    baseline = BaselineSpec(kind="constant", params={"values": [0.3, 0.2]})
+    beta = [[2.0, 1.5], [1.2, 2.5]]
+    alpha = [[0.2, 0.1], [0.05, 0.15]]
+    exponential = KernelSpec(kind="exponential", params={"beta": beta})
+    lagged = KernelSpec(
+        kind="lagged_exponential",
+        params={"beta": beta, "tau": [[0.0, 0.0], [0.0, 0.0]]},
+    )
+    result_exponential = simulate_hawkes(
+        t_max=100.0,
+        baseline=baseline,
+        alpha=alpha,
+        kernel=exponential,
+        rng=np.random.default_rng(101),
+    )
+    result_lagged = simulate_hawkes(
+        t_max=100.0,
+        baseline=baseline,
+        alpha=alpha,
+        kernel=lagged,
+        rng=np.random.default_rng(101),
+    )
+    assert result_lagged == result_exponential
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"beta": [[2.0]]},
+        {"tau": [[0.1]]},
+    ],
+)
+def test_lagged_exponential_requires_beta_and_tau(
+    params: dict[str, list[list[float]]],
+) -> None:
+    """The Python specification rejects either missing kernel matrix."""
+    baseline = BaselineSpec(kind="constant", params={"values": [0.3]})
+    kernel = KernelSpec(kind="lagged_exponential", params=params)
+    with pytest.raises(
+        ValueError,
+        match="requires 'beta' and 'tau'",
+    ):
+        simulate_hawkes(
+            t_max=10.0,
+            baseline=baseline,
+            alpha=[[0.1]],
+            kernel=kernel,
+            rng=np.random.default_rng(1),
+        )
+
+
+@pytest.mark.parametrize(
+    ("beta", "tau", "message"),
+    [
+        ([[0.0]], [[0.0]], "beta must contain only finite positive values"),
+        ([[np.inf]], [[0.0]], "beta must contain only finite positive values"),
+        ([[1.0]], [[-0.1]], "tau must contain only finite non-negative values"),
+        ([[1.0]], [[np.nan]], "tau must contain only finite non-negative values"),
+        (
+            [[1.0, 2.0], [3.0, 4.0]],
+            [[0.1]],
+            "beta and tau must be non-empty square matrices with matching shapes",
+        ),
+        (
+            [[1.0, 2.0]],
+            [[0.1, 0.2]],
+            "beta and tau must be non-empty square matrices with matching shapes",
+        ),
+    ],
+)
+def test_lagged_exponential_rejects_invalid_parameters(
+    beta: list[list[float]],
+    tau: list[list[float]],
+    message: str,
+) -> None:
+    """Invalid lagged-kernel matrices raise Python ValueError instead of panicking."""
+    baseline = BaselineSpec(kind="constant", params={"values": [0.3]})
+    kernel = KernelSpec(kind="lagged_exponential", params={"beta": beta, "tau": tau})
+    with pytest.raises(ValueError, match=message):
+        simulate_hawkes(
+            t_max=10.0,
+            baseline=baseline,
+            alpha=[[0.1]],
+            kernel=kernel,
+            rng=np.random.default_rng(1),
+        )
+
+
+def test_lagged_exponential_dimension_matches_baseline() -> None:
+    """Kernel matrices must have the same dimension as the baseline and alpha."""
+    baseline = BaselineSpec(kind="constant", params={"values": [0.3, 0.2]})
+    kernel = KernelSpec(
+        kind="lagged_exponential",
+        params={"beta": [[1.0]], "tau": [[0.1]]},
+    )
+    with pytest.raises(
+        ValueError,
+        match="dimensions must match the baseline dimension",
+    ):
+        simulate_hawkes(
+            t_max=10.0,
+            baseline=baseline,
+            alpha=[[0.1, 0.0], [0.0, 0.1]],
+            kernel=kernel,
+            rng=np.random.default_rng(1),
+        )
+
+
 def test_simulate_hawkes_inverse_transform_sampling() -> None:
     """Check inverse-transform immigrant sampling outputs and ranges."""
     baseline = BaselineSpec(kind="constant", params={"values": [0.2, 0.1]})

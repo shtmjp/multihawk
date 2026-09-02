@@ -1,5 +1,9 @@
 pub trait Kernel {
     fn sample_delay<R: rand::Rng + ?Sized>(&self, i: usize, j: usize, rng: &mut R) -> f64;
+
+    fn validate_dimension(&self, _dimension: usize) -> Result<(), &'static str> {
+        Ok(())
+    }
 }
 
 use rand::distr::OpenClosed01;
@@ -77,6 +81,48 @@ impl Kernel for ExpKernel {
     }
 }
 
+pub struct LaggedExpKernel {
+    pub(crate) lambda: Vec<Vec<f64>>,
+    pub(crate) tau: Vec<Vec<f64>>,
+}
+
+impl LaggedExpKernel {
+    pub fn new(lambda: Vec<Vec<f64>>, tau: Vec<Vec<f64>>) -> Result<Self, &'static str> {
+        let d = lambda.len();
+        if d == 0 || tau.len() != d {
+            return Err("beta and tau must be non-empty square matrices with matching shapes");
+        }
+        for i in 0..d {
+            if lambda[i].len() != d || tau[i].len() != d {
+                return Err("beta and tau must be non-empty square matrices with matching shapes");
+            }
+            for j in 0..d {
+                if !lambda[i][j].is_finite() || lambda[i][j] <= 0.0 {
+                    return Err("beta must contain only finite positive values");
+                }
+                if !tau[i][j].is_finite() || tau[i][j] < 0.0 {
+                    return Err("tau must contain only finite non-negative values");
+                }
+            }
+        }
+        Ok(Self { lambda, tau })
+    }
+}
+
+impl Kernel for LaggedExpKernel {
+    fn sample_delay<R: rand::Rng + ?Sized>(&self, i: usize, j: usize, rng: &mut R) -> f64 {
+        let exponential_delay = rand_distr::Exp::new(self.lambda[i][j]).unwrap().sample(rng);
+        self.tau[i][j] + exponential_delay
+    }
+
+    fn validate_dimension(&self, dimension: usize) -> Result<(), &'static str> {
+        if self.lambda.len() != dimension {
+            return Err("beta and tau dimensions must match the baseline dimension");
+        }
+        Ok(())
+    }
+}
+
 pub struct GammaKernel {
     pub(crate) shape: Vec<Vec<f64>>,
     pub(crate) rate: Vec<Vec<f64>>,
@@ -151,6 +197,7 @@ impl Kernel for PowerLawKernel {
 
 pub enum KernelKind {
     Exponential(ExpKernel),
+    LaggedExponential(LaggedExpKernel),
     Gamma(GammaKernel),
     MixedExponential(MixedExpKernel),
     PowerLaw(PowerLawKernel),
@@ -160,9 +207,44 @@ impl Kernel for KernelKind {
     fn sample_delay<R: rand::Rng + ?Sized>(&self, i: usize, j: usize, rng: &mut R) -> f64 {
         match self {
             Self::Exponential(kernel) => kernel.sample_delay(i, j, rng),
+            Self::LaggedExponential(kernel) => kernel.sample_delay(i, j, rng),
             Self::Gamma(kernel) => kernel.sample_delay(i, j, rng),
             Self::MixedExponential(kernel) => kernel.sample_delay(i, j, rng),
             Self::PowerLaw(kernel) => kernel.sample_delay(i, j, rng),
         }
+    }
+
+    fn validate_dimension(&self, dimension: usize) -> Result<(), &'static str> {
+        match self {
+            Self::Exponential(kernel) => kernel.validate_dimension(dimension),
+            Self::LaggedExponential(kernel) => kernel.validate_dimension(dimension),
+            Self::Gamma(kernel) => kernel.validate_dimension(dimension),
+            Self::MixedExponential(kernel) => kernel.validate_dimension(dimension),
+            Self::PowerLaw(kernel) => kernel.validate_dimension(dimension),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Kernel, LaggedExpKernel};
+    use rand::SeedableRng;
+
+    #[test]
+    fn lagged_exponential_delay_has_expected_support_and_mean() {
+        let kernel = LaggedExpKernel::new(vec![vec![2.0]], vec![vec![0.4]]).unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(20260901);
+        let sample_count = 50_000;
+        let mut total = 0.0;
+
+        for _ in 0..sample_count {
+            let delay = kernel.sample_delay(0, 0, &mut rng);
+            assert!(delay > 0.4);
+            total += delay;
+        }
+
+        let sample_mean = total / sample_count as f64;
+        let expected_mean = 0.4 + 1.0 / 2.0;
+        assert!((sample_mean - expected_mean).abs() < 0.02);
     }
 }

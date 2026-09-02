@@ -117,6 +117,7 @@ pub fn simulate_hawkes_branching_with_baseline<R: rand::Rng + ?Sized, K: Kernel,
     if alpha.len() != d || !alpha.iter().all(|row| row.len() == d) {
         return Err("alpha must be a square matrix matching the baseline dimension");
     }
+    kernel.validate_dimension(d)?;
     if t_max <= 0.0 {
         return Err("t_max must be positive");
     }
