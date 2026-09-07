@@ -19,12 +19,15 @@ impl MixedExpKernel {
         mut weights: Vec<Vec<Vec<f64>>>,
         lambda: Vec<Vec<Vec<f64>>>,
     ) -> Result<Self, &'static str> {
-        if weights.len() != lambda.len() {
-            return Err("weights and beta must have the same first dimension");
+        let d = weights.len();
+        if d == 0 || lambda.len() != d {
+            return Err("weights and beta must be non-empty square tensors with matching shapes");
         }
-        for i in 0..weights.len() {
-            if weights[i].len() != lambda[i].len() {
-                return Err("weights and beta must have matching shapes");
+        for i in 0..d {
+            if weights[i].len() != d || lambda[i].len() != d {
+                return Err(
+                    "weights and beta must be non-empty square tensors with matching shapes",
+                );
             }
             for j in 0..weights[i].len() {
                 if weights[i][j].len() != lambda[i][j].len() {
@@ -35,32 +38,43 @@ impl MixedExpKernel {
                 }
                 let mut total_weight = 0.0;
                 for (k, &weight) in weights[i][j].iter().enumerate() {
-                    if weight < 0.0 {
-                        return Err("mixture weights must be non-negative");
+                    if !weight.is_finite() || weight < 0.0 {
+                        return Err("mixture weights must be finite and non-negative");
                     }
                     let rate = lambda[i][j][k];
-                    if rate <= 0.0 {
-                        return Err("mixture rates must be positive");
+                    if !rate.is_finite() || rate <= 0.0 {
+                        return Err("mixture rates must be finite and positive");
                     }
                     total_weight += weight;
                 }
-                if total_weight <= 0.0 {
-                    return Err("mixture weights must sum to a positive value");
+                if !total_weight.is_finite() || total_weight <= 0.0 {
+                    return Err("mixture weights must sum to a finite positive value");
                 }
+                let last_positive = weights[i][j]
+                    .iter()
+                    .rposition(|&weight| weight > 0.0)
+                    .unwrap();
                 let mut cumulative = 0.0;
                 for weight in &mut weights[i][j] {
                     cumulative += *weight / total_weight;
                     *weight = cumulative;
                 }
-                if let Some(last) = weights[i][j].last_mut() {
-                    *last = 1.0;
-                }
+                // Assign rounding residue to a positive component, never a trailing zero weight.
+                weights[i][j][last_positive..].fill(1.0);
             }
         }
         Ok(Self {
             lambda,
             cdf: weights,
         })
+    }
+
+    fn sample_component<R: rand::Rng + ?Sized>(&self, i: usize, j: usize, rng: &mut R) -> usize {
+        let cdf = &self.cdf[i][j];
+        let u: f64 = rand::Rng::random(rng);
+        cdf.iter()
+            .position(|&threshold| u < threshold)
+            .unwrap_or(cdf.len() - 1)
     }
 }
 
@@ -146,14 +160,63 @@ impl Kernel for GammaKernel {
 
 impl Kernel for MixedExpKernel {
     fn sample_delay<R: rand::Rng + ?Sized>(&self, i: usize, j: usize, rng: &mut R) -> f64 {
-        let cdf = &self.cdf[i][j];
-        let u: f64 = rand::Rng::random(rng);
-        let idx = cdf
-            .iter()
-            .position(|&threshold| u <= threshold)
-            .unwrap_or(cdf.len() - 1);
+        let idx = self.sample_component(i, j, rng);
         let lambda = self.lambda[i][j][idx];
         rand_distr::Exp::new(lambda).unwrap().sample(rng)
+    }
+
+    fn validate_dimension(&self, dimension: usize) -> Result<(), &'static str> {
+        if self.lambda.len() != dimension {
+            return Err("weights and beta dimensions must match the baseline dimension");
+        }
+        Ok(())
+    }
+}
+
+pub struct LaggedMixedExpKernel {
+    mixture: MixedExpKernel,
+    tau: Vec<Vec<Vec<f64>>>,
+}
+
+impl LaggedMixedExpKernel {
+    pub fn new(
+        weights: Vec<Vec<Vec<f64>>>,
+        lambda: Vec<Vec<Vec<f64>>>,
+        tau: Vec<Vec<Vec<f64>>>,
+    ) -> Result<Self, &'static str> {
+        let mixture = MixedExpKernel::new(weights, lambda)?;
+        let d = mixture.lambda.len();
+        if tau.len() != d {
+            return Err("tau must match the weights and beta shapes");
+        }
+        for i in 0..d {
+            if tau[i].len() != d {
+                return Err("tau must match the weights and beta shapes");
+            }
+            for j in 0..d {
+                if tau[i][j].len() != mixture.lambda[i][j].len() {
+                    return Err("tau must match the weights and beta shapes");
+                }
+                if tau[i][j].iter().any(|&lag| !lag.is_finite() || lag < 0.0) {
+                    return Err("tau must contain only finite non-negative values");
+                }
+            }
+        }
+        Ok(Self { mixture, tau })
+    }
+}
+
+impl Kernel for LaggedMixedExpKernel {
+    fn sample_delay<R: rand::Rng + ?Sized>(&self, i: usize, j: usize, rng: &mut R) -> f64 {
+        let idx = self.mixture.sample_component(i, j, rng);
+        let exponential_delay = rand_distr::Exp::new(self.mixture.lambda[i][j][idx])
+            .unwrap()
+            .sample(rng);
+        self.tau[i][j][idx] + exponential_delay
+    }
+
+    fn validate_dimension(&self, dimension: usize) -> Result<(), &'static str> {
+        self.mixture.validate_dimension(dimension)
     }
 }
 
@@ -200,6 +263,7 @@ pub enum KernelKind {
     LaggedExponential(LaggedExpKernel),
     Gamma(GammaKernel),
     MixedExponential(MixedExpKernel),
+    LaggedMixedExponential(LaggedMixedExpKernel),
     PowerLaw(PowerLawKernel),
 }
 
@@ -210,6 +274,7 @@ impl Kernel for KernelKind {
             Self::LaggedExponential(kernel) => kernel.sample_delay(i, j, rng),
             Self::Gamma(kernel) => kernel.sample_delay(i, j, rng),
             Self::MixedExponential(kernel) => kernel.sample_delay(i, j, rng),
+            Self::LaggedMixedExponential(kernel) => kernel.sample_delay(i, j, rng),
             Self::PowerLaw(kernel) => kernel.sample_delay(i, j, rng),
         }
     }
@@ -220,6 +285,7 @@ impl Kernel for KernelKind {
             Self::LaggedExponential(kernel) => kernel.validate_dimension(dimension),
             Self::Gamma(kernel) => kernel.validate_dimension(dimension),
             Self::MixedExponential(kernel) => kernel.validate_dimension(dimension),
+            Self::LaggedMixedExponential(kernel) => kernel.validate_dimension(dimension),
             Self::PowerLaw(kernel) => kernel.validate_dimension(dimension),
         }
     }
@@ -227,8 +293,9 @@ impl Kernel for KernelKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kernel, LaggedExpKernel};
-    use rand::SeedableRng;
+    use super::{Kernel, LaggedExpKernel, LaggedMixedExpKernel, MixedExpKernel};
+    use rand::{RngCore, SeedableRng};
+    use rand_distr::Distribution;
 
     #[test]
     fn lagged_exponential_delay_has_expected_support_and_mean() {
@@ -246,5 +313,156 @@ mod tests {
         let sample_mean = total / sample_count as f64;
         let expected_mean = 0.4 + 1.0 / 2.0;
         assert!((sample_mean - expected_mean).abs() < 0.02);
+    }
+
+    #[test]
+    fn lagged_mixture_has_expected_support_cdf_and_mean() {
+        let kernel = LaggedMixedExpKernel::new(
+            vec![vec![vec![2.0, 3.0]]],
+            vec![vec![vec![2.0, 0.5]]],
+            vec![vec![vec![0.2, 1.4]]],
+        )
+        .unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(20260905);
+        let sample_count = 50_000;
+        let thresholds = [0.8, 2.0];
+        let mut below = [0; 2];
+        let mut total = 0.0;
+
+        for _ in 0..sample_count {
+            let delay = kernel.sample_delay(0, 0, &mut rng);
+            assert!(delay > 0.2);
+            total += delay;
+            for (idx, &threshold) in thresholds.iter().enumerate() {
+                if delay <= threshold {
+                    below[idx] += 1;
+                }
+            }
+        }
+
+        let expected_mean = 0.4 * (0.2 + 1.0 / 2.0) + 0.6 * (1.4 + 1.0 / 0.5);
+        assert!((total / sample_count as f64 - expected_mean).abs() < 0.06);
+        for (idx, &threshold) in thresholds.iter().enumerate() {
+            let expected_cdf = 0.4 * (1.0 - (-2.0 * (threshold - 0.2)).exp())
+                + if threshold > 1.4 {
+                    0.6 * (1.0 - (-0.5 * (threshold - 1.4)).exp())
+                } else {
+                    0.0
+                };
+            assert!((below[idx] as f64 / sample_count as f64 - expected_cdf).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn lagged_mixture_uses_parent_child_and_component_indices() {
+        let kernel = LaggedMixedExpKernel::new(
+            vec![
+                vec![vec![1.0], vec![0.0, 1.0]],
+                vec![vec![1.0, 0.0, 0.0], vec![1.0]],
+            ],
+            vec![
+                vec![vec![1.0], vec![3.0, 5.0]],
+                vec![vec![7.0, 8.0, 9.0], vec![11.0]],
+            ],
+            vec![
+                vec![vec![0.2], vec![10.0, 20.0]],
+                vec![vec![30.0, 40.0, 50.0], vec![60.0]],
+            ],
+        )
+        .unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(47);
+        let mut reference_rng = rng.clone();
+        for (parent, child, rate, lag) in [(0, 1, 5.0, 20.0), (1, 0, 7.0, 30.0)] {
+            for _ in 0..100 {
+                let _: f64 = rand::Rng::random(&mut reference_rng);
+                let expected = lag
+                    + rand_distr::Exp::new(rate)
+                        .unwrap()
+                        .sample(&mut reference_rng);
+                assert_eq!(kernel.sample_delay(parent, child, &mut rng), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn zero_lag_mixture_matches_mixed_exponential_random_stream() {
+        for weights in [vec![1.0], vec![0.0, 2.0, 3.0], vec![0.1, 0.2, 0.3]] {
+            let beta: Vec<f64> = (1..=weights.len()).map(|k| k as f64).collect();
+            let tau = vec![0.0; weights.len()];
+            let mixed =
+                MixedExpKernel::new(vec![vec![weights.clone()]], vec![vec![beta.clone()]]).unwrap();
+            let lagged =
+                LaggedMixedExpKernel::new(vec![vec![weights]], vec![vec![beta]], vec![vec![tau]])
+                    .unwrap();
+            let mut rng_mixed = rand::rngs::StdRng::seed_from_u64(89);
+            let mut rng_lagged = rng_mixed.clone();
+            for _ in 0..500 {
+                assert_eq!(
+                    mixed.sample_delay(0, 0, &mut rng_mixed).to_bits(),
+                    lagged.sample_delay(0, 0, &mut rng_lagged).to_bits()
+                );
+            }
+            assert_eq!(rng_mixed.next_u64(), rng_lagged.next_u64());
+        }
+    }
+
+    #[test]
+    #[allow(deprecated)] // rand's deterministic testing RNG has no replacement.
+    fn mixture_selection_skips_zero_weights_at_boundaries() {
+        let mixed = MixedExpKernel::new(
+            vec![vec![vec![0.0, 1.0, 0.0, 1.0, 0.0]]],
+            vec![vec![vec![1.0; 5]]],
+        )
+        .unwrap();
+        for (bits, expected) in [(0, 1), (1 << 63, 3), (u64::MAX, 3)] {
+            let mut rng = rand::rngs::mock::StepRng::new(bits, 0);
+            assert_eq!(mixed.sample_component(0, 0, &mut rng), expected);
+        }
+        let mut weights = vec![1.0; 10];
+        weights.push(0.0);
+        let mixed = MixedExpKernel::new(vec![vec![weights]], vec![vec![vec![1.0; 11]]]).unwrap();
+        let mut rng = rand::rngs::mock::StepRng::new(u64::MAX, 0);
+        assert_eq!(mixed.sample_component(0, 0, &mut rng), 9);
+    }
+
+    #[test]
+    fn mixtures_reject_invalid_shapes_values_and_dimensions() {
+        let tensor = |values: Vec<f64>| vec![vec![values]];
+        for weights in [vec![], vec![vec![]], tensor(vec![])] {
+            assert!(MixedExpKernel::new(weights.clone(), weights).is_err());
+        }
+        assert!(MixedExpKernel::new(tensor(vec![1.0, 2.0]), tensor(vec![1.0])).is_err());
+        for weights in [
+            vec![-1.0],
+            vec![f64::NAN],
+            vec![f64::INFINITY],
+            vec![0.0],
+            vec![f64::MAX, f64::MAX],
+        ] {
+            let beta = vec![1.0; weights.len()];
+            assert!(MixedExpKernel::new(tensor(weights), tensor(beta)).is_err());
+        }
+        for beta in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(MixedExpKernel::new(tensor(vec![1.0]), tensor(vec![beta])).is_err());
+        }
+        for tau in [
+            vec![],
+            vec![vec![]],
+            tensor(vec![]),
+            tensor(vec![0.0, 0.1]),
+            tensor(vec![-0.1]),
+            tensor(vec![f64::NAN]),
+            tensor(vec![f64::INFINITY]),
+        ] {
+            assert!(LaggedMixedExpKernel::new(tensor(vec![1.0]), tensor(vec![1.0]), tau).is_err());
+        }
+        let mixed = MixedExpKernel::new(tensor(vec![1.0]), tensor(vec![1.0])).unwrap();
+        let lagged =
+            LaggedMixedExpKernel::new(tensor(vec![1.0]), tensor(vec![1.0]), tensor(vec![0.0]))
+                .unwrap();
+        assert!(mixed.validate_dimension(1).is_ok());
+        assert!(lagged.validate_dimension(1).is_ok());
+        assert!(mixed.validate_dimension(2).is_err());
+        assert!(lagged.validate_dimension(2).is_err());
     }
 }

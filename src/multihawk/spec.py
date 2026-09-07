@@ -52,6 +52,25 @@ def _exponential_kernel_backend(
     }
 
 
+def _mixed_exponential_kernel_backend(
+    kind: Literal["mixed_exponential", "lagged_mixed_exponential"],
+    params: Mapping[str, Any],
+) -> dict[str, Any]:
+    required: tuple[str, ...] = ("weights", "beta")
+    if kind == "lagged_mixed_exponential":
+        required = ("weights", "beta", "tau")
+    if any(name not in params for name in required):
+        if kind == "mixed_exponential":
+            msg = "KernelSpec for 'mixed_exponential' requires 'weights' and 'beta'"
+        else:
+            msg = "KernelSpec for 'lagged_mixed_exponential' requires 'weights', 'beta' and 'tau'"
+        raise ValueError(msg)
+    return {
+        "kind": kind,
+        "params": {name: _to_float_tensor(params[name]) for name in required},
+    }
+
+
 @dataclass
 class BaselineSpec:
     """Specification for non-homogeneous baseline intensities."""
@@ -102,13 +121,19 @@ class BaselineSpec:
 
 @dataclass
 class KernelSpec:
-    """Specification for triggering kernels."""
+    """Specification for triggering kernels.
+
+    ``lagged_mixed_exponential`` takes ``weights``, ``beta``, and ``tau`` in
+    ``[parent][child][component]`` order. Weights are normalized within each
+    pair; ``beta`` contains positive rates and ``tau`` non-negative lags.
+    """
 
     kind: Literal[
         "exponential",
         "lagged_exponential",
         "gamma",
         "mixed_exponential",
+        "lagged_mixed_exponential",
         "power_law",
     ]
     params: Mapping[str, Any]
@@ -132,19 +157,8 @@ class KernelSpec:
                 },
             }
 
-        if self.kind == "mixed_exponential":
-            if "weights" not in self.params or "beta" not in self.params:
-                msg = "KernelSpec for 'mixed_exponential' requires 'weights' and 'beta'"
-                raise ValueError(msg)
-            weights = self.params["weights"]
-            beta = self.params["beta"]
-            return {
-                "kind": self.kind,
-                "params": {
-                    "weights": _to_float_tensor(weights),
-                    "beta": _to_float_tensor(beta),
-                },
-            }
+        if self.kind in {"mixed_exponential", "lagged_mixed_exponential"}:
+            return _mixed_exponential_kernel_backend(self.kind, self.params)
 
         if self.kind == "power_law":
             delta = self.params.get("delta", self.params.get("cutoff"))

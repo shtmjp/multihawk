@@ -9,7 +9,10 @@ use pp_data::MultivariatePPData;
 mod simulate;
 use simulate::{simulate_hawkes_branching_with_baseline, ImmigrantSamplingMethod};
 mod kernel;
-use kernel::{ExpKernel, GammaKernel, KernelKind, LaggedExpKernel, MixedExpKernel, PowerLawKernel};
+use kernel::{
+    ExpKernel, GammaKernel, KernelKind, LaggedExpKernel, LaggedMixedExpKernel, MixedExpKernel,
+    PowerLawKernel,
+};
 
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -170,7 +173,7 @@ fn kernel_from_object(py: Python<'_>, obj: PyObject) -> PyResult<KernelKind> {
                 .extract()?;
             Ok(KernelKind::Gamma(GammaKernel::new(shape, rate)))
         }
-        "mixed_exponential" => {
+        "mixed_exponential" | "lagged_mixed_exponential" => {
             let weights: Vec<Vec<Vec<f64>>> = params
                 .get_item("weights")?
                 .ok_or_else(|| PyValueError::new_err("kernel params must include 'weights'"))?
@@ -179,9 +182,19 @@ fn kernel_from_object(py: Python<'_>, obj: PyObject) -> PyResult<KernelKind> {
                 .get_item("beta")?
                 .ok_or_else(|| PyValueError::new_err("kernel params must include 'beta'"))?
                 .extract()?;
-            MixedExpKernel::new(weights, beta)
-                .map(KernelKind::MixedExponential)
-                .map_err(PyValueError::new_err)
+            if kind == "lagged_mixed_exponential" {
+                let tau: Vec<Vec<Vec<f64>>> = params
+                    .get_item("tau")?
+                    .ok_or_else(|| PyValueError::new_err("kernel params must include 'tau'"))?
+                    .extract()?;
+                LaggedMixedExpKernel::new(weights, beta, tau)
+                    .map(KernelKind::LaggedMixedExponential)
+                    .map_err(PyValueError::new_err)
+            } else {
+                MixedExpKernel::new(weights, beta)
+                    .map(KernelKind::MixedExponential)
+                    .map_err(PyValueError::new_err)
+            }
         }
         "power_law" => {
             let delta_value = params.get_item("delta")?;

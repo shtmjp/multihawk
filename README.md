@@ -63,6 +63,8 @@ Kernel specifications currently support:
   non-negative lag for each interaction pair.
 - `"gamma"`: gamma-distributed triggering with configurable shape and rate.
 - `"mixed_exponential"`: mixtures of exponential components for each pair.
+- `"lagged_mixed_exponential"`: mixtures of exponential components with a
+  separate non-negative lag for each component of each pair.
 
   More families can be added by extending the spec objects.
 
@@ -162,6 +164,62 @@ result_mixed = simulate_hawkes(
 )
 ```
 
+For a mixture with component-specific lags, use `lagged_mixed_exponential`.
+All three parameters, `weights`, `beta`, and `tau`, use
+`[parent][child][component]` order and must have matching shapes. The first
+two dimensions form a square matching the baseline dimension. The number of
+components may differ between pairs, but each pair must have at least one.
+Weights must be finite and non-negative, with a finite positive sum per pair;
+they are normalized within each pair. Rates must be finite and positive, and
+lags must be finite and non-negative. To use a common lag for a pair, repeat
+that value for each of its components.
+
+For parent `j`, child `i`, and normalized weights
+\(p_{jik}=w_{jik}/\sum_\ell w_{ji\ell}\), the triggering kernel is
+
+\[
+\phi_{j\to i}(u)
+= \alpha_{ji}\sum_k p_{jik}\,\beta_{jik}
+  \exp\{-\beta_{jik}(u-\tau_{jik})\}
+  \mathbf{1}\{u>\tau_{jik}\}.
+\]
+
+Here `alpha[parent][child]` is the total integrated triggering kernel, or the
+expected number of direct children of that type per parent. A component's
+integrated contribution is `alpha[parent][child] * p[parent][child][component]`.
+
+```python
+from multihawk import BaselineSpec, KernelSpec, simulate_hawkes
+
+kernel = KernelSpec(
+    kind="lagged_mixed_exponential",
+    params={
+        "weights": [[[0.7, 0.3], [0.4, 0.6]], [[0.5, 0.5], [0.2, 0.8]]],
+        "beta": [[[1.5, 3.0], [0.5, 1.5]], [[1.0, 2.5], [0.8, 2.0]]],
+        "tau": [[[0.1, 0.6], [0.3, 0.8]], [[0.2, 0.5], [0.1, 0.4]]],
+    },
+)
+result_lagged_mixed = simulate_hawkes(
+    t_max=50.0,
+    baseline=BaselineSpec(kind="constant", params={"values": [0.2, 0.1]}),
+    alpha=[[0.2, 0.1], [0.0, 0.1]],
+    kernel=kernel,
+    seed=0,
+)
+print(result_lagged_mixed.timestamps)
+```
+
+The branching simulator chooses a component according to its normalized
+weight, then samples the child delay as `tau + Exp(beta)` for that component.
+It starts with empty history at time zero and retains events in `[0, t_max)`;
+it does not initialize from a stationary history. Both immigrant sampling
+methods (`thinning` and `inverse_transform`) work with this kernel.
+Setting every lag to zero produces the same timestamps and RNG state as
+`mixed_exponential` with the same inputs and initial RNG state. With a single
+component per pair, it has the same distribution as `lagged_exponential`,
+but uses an additional random draw to select the component, so equal seeds
+need not produce identical timestamps across those two kernel kinds.
+
 To simulate with a time-varying baseline, build the appropriate `BaselineSpec`:
 
 ```python
@@ -228,7 +286,7 @@ result_linear = simulate_hawkes(
 - **stmorse/hawkes** — Minimal multivariate Hawkes for learning/testing.
 - **Sparklen** — High-dimensional exponential Hawkes with a C++ core and regularization.
 
-**Positioning** — MultiHawk focuses on fast, reproducible multivariate simulation with various specifications: `BaselineSpec` supports constant/piecewise-constant/piecewise-linear, and `KernelSpec` supports exponential/gamma/mixed-exponential. It forwards `numpy.random.Generator` (PCG64/PCG64DXSM) state to a Rust backend to guarantee bitwise-reproducible runs. Use MultiHawk for large-scale synthetic data and benchmarking, and combine with `tick`/`pyhawkes`/others for parameter estimation on simulated or real data.
+**Positioning** — MultiHawk focuses on fast, reproducible multivariate simulation with various specifications: `BaselineSpec` supports constant/piecewise-constant/piecewise-linear, and `KernelSpec` supports exponential/gamma/mixed-exponential kernels, including lagged exponential and lagged mixed-exponential kernels. It forwards `numpy.random.Generator` (PCG64/PCG64DXSM) state to a Rust backend to guarantee bitwise-reproducible runs. Use MultiHawk for large-scale synthetic data and benchmarking, and combine with `tick`/`pyhawkes`/others for parameter estimation on simulated or real data.
 
 ## Development notes
 - Release:
