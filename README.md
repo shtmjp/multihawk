@@ -62,6 +62,8 @@ Kernel specifications currently support:
 - `"lagged_exponential"`: exponential decay beginning after a deterministic
   non-negative lag for each interaction pair.
 - `"gamma"`: gamma-distributed triggering with configurable shape and rate.
+- `"lagged_gamma"`: gamma-distributed triggering beginning after a deterministic
+  non-negative lag for each interaction pair.
 - `"mixed_exponential"`: mixtures of exponential components for each pair.
 - `"lagged_mixed_exponential"`: mixtures of exponential components with a
   separate non-negative lag for each component of each pair.
@@ -134,6 +136,55 @@ alpha = [[0.2, 0.1], [0.0, 0.1]]
 
 result_gamma = simulate_hawkes(t_max=50.0, baseline=baseline, alpha=alpha, kernel=kernel, rng=rng)
 ```
+
+For a lagged gamma kernel, use `lagged_gamma` and supply `shape`, `rate`, and
+`tau` matrices. All entries, including `alpha`, use `[parent][child]` order.
+The three kernel matrices must be non-empty squares matching the baseline
+dimension. Shape and rate must be finite and positive; fractional shapes
+(including values below one) are supported. Lags must be finite and
+non-negative. `rate` is the inverse scale, and `tau` uses the same time unit
+as the observation window.
+
+For parent `j` and child `i`, with `a = shape[j][i]` and `b = rate[j][i]`,
+the triggering kernel is zero for \(u \leq \tau_{ji}\), and otherwise
+
+\[
+\phi_{j\to i}(u)
+= \alpha_{ji}\,\frac{b^a}{\Gamma(a)}
+  (u-\tau_{ji})^{a-1}\exp\{-b(u-\tau_{ji})\}.
+\]
+
+Thus `alpha[parent][child]` remains the integrated triggering kernel, or
+the expected total number of direct children of that type per parent.
+The simulator samples each child delay as `tau + Gamma(shape, scale=1/rate)`.
+
+```python
+from multihawk import BaselineSpec, KernelSpec, simulate_hawkes
+
+kernel = KernelSpec(
+    kind="lagged_gamma",
+    params={
+        "shape": [[2.0, 3.0], [0.75, 2.5]],
+        "rate": [[1.5, 2.0], [2.0, 1.0]],
+        "tau": [[0.10, 0.35], [0.25, 0.15]],
+    },
+)
+result_lagged_gamma = simulate_hawkes(
+    t_max=50.0,
+    baseline=BaselineSpec(kind="constant", params={"values": [0.2, 0.1]}),
+    alpha=[[0.2, 0.1], [0.05, 0.1]],
+    kernel=kernel,
+    seed=0,
+)
+print(result_lagged_gamma.timestamps)
+```
+
+Both immigrant sampling methods (`thinning` and `inverse_transform`) and
+all existing baseline kinds work with this kernel. The existing `seed` and
+NumPy `rng` options are unchanged. Setting every lag to zero produces the
+same timestamps and RNG state as `gamma` with identical inputs and initial
+RNG state. As with the other kernels, simulations start with empty history
+at time zero and retain events in `[0, t_max)`.
 
 To mix multiple exponential components for each interaction, use the
 ``mixed_exponential`` kernel. The ``weights`` parameter supplies the mixture

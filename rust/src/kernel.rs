@@ -158,6 +158,59 @@ impl Kernel for GammaKernel {
     }
 }
 
+pub struct LaggedGammaKernel {
+    gamma: GammaKernel,
+    tau: Vec<Vec<f64>>,
+}
+
+impl LaggedGammaKernel {
+    pub fn new(
+        shape: Vec<Vec<f64>>,
+        rate: Vec<Vec<f64>>,
+        tau: Vec<Vec<f64>>,
+    ) -> Result<Self, &'static str> {
+        let d = shape.len();
+        if d == 0 || rate.len() != d || tau.len() != d {
+            return Err("shape, rate, and tau must be non-empty square matrices with matching shapes");
+        }
+        for i in 0..d {
+            if shape[i].len() != d || rate[i].len() != d || tau[i].len() != d {
+                return Err(
+                    "shape, rate, and tau must be non-empty square matrices with matching shapes",
+                );
+            }
+            for j in 0..d {
+                if !shape[i][j].is_finite() || shape[i][j] <= 0.0 {
+                    return Err("shape must contain only finite positive values");
+                }
+                if !rate[i][j].is_finite() || rate[i][j] <= 0.0 {
+                    return Err("rate must contain only finite positive values");
+                }
+                if !tau[i][j].is_finite() || tau[i][j] < 0.0 {
+                    return Err("tau must contain only finite non-negative values");
+                }
+            }
+        }
+        Ok(Self {
+            gamma: GammaKernel::new(shape, rate),
+            tau,
+        })
+    }
+}
+
+impl Kernel for LaggedGammaKernel {
+    fn sample_delay<R: rand::Rng + ?Sized>(&self, i: usize, j: usize, rng: &mut R) -> f64 {
+        self.tau[i][j] + self.gamma.sample_delay(i, j, rng)
+    }
+
+    fn validate_dimension(&self, dimension: usize) -> Result<(), &'static str> {
+        if self.gamma.shape.len() != dimension {
+            return Err("shape, rate, and tau dimensions must match the baseline dimension");
+        }
+        Ok(())
+    }
+}
+
 impl Kernel for MixedExpKernel {
     fn sample_delay<R: rand::Rng + ?Sized>(&self, i: usize, j: usize, rng: &mut R) -> f64 {
         let idx = self.sample_component(i, j, rng);
@@ -262,6 +315,7 @@ pub enum KernelKind {
     Exponential(ExpKernel),
     LaggedExponential(LaggedExpKernel),
     Gamma(GammaKernel),
+    LaggedGamma(LaggedGammaKernel),
     MixedExponential(MixedExpKernel),
     LaggedMixedExponential(LaggedMixedExpKernel),
     PowerLaw(PowerLawKernel),
@@ -273,6 +327,7 @@ impl Kernel for KernelKind {
             Self::Exponential(kernel) => kernel.sample_delay(i, j, rng),
             Self::LaggedExponential(kernel) => kernel.sample_delay(i, j, rng),
             Self::Gamma(kernel) => kernel.sample_delay(i, j, rng),
+            Self::LaggedGamma(kernel) => kernel.sample_delay(i, j, rng),
             Self::MixedExponential(kernel) => kernel.sample_delay(i, j, rng),
             Self::LaggedMixedExponential(kernel) => kernel.sample_delay(i, j, rng),
             Self::PowerLaw(kernel) => kernel.sample_delay(i, j, rng),
@@ -284,6 +339,7 @@ impl Kernel for KernelKind {
             Self::Exponential(kernel) => kernel.validate_dimension(dimension),
             Self::LaggedExponential(kernel) => kernel.validate_dimension(dimension),
             Self::Gamma(kernel) => kernel.validate_dimension(dimension),
+            Self::LaggedGamma(kernel) => kernel.validate_dimension(dimension),
             Self::MixedExponential(kernel) => kernel.validate_dimension(dimension),
             Self::LaggedMixedExponential(kernel) => kernel.validate_dimension(dimension),
             Self::PowerLaw(kernel) => kernel.validate_dimension(dimension),
@@ -293,7 +349,10 @@ impl Kernel for KernelKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kernel, LaggedExpKernel, LaggedMixedExpKernel, MixedExpKernel};
+    use super::{
+        GammaKernel, Kernel, KernelKind, LaggedExpKernel, LaggedGammaKernel, LaggedMixedExpKernel,
+        MixedExpKernel,
+    };
     use rand::{RngCore, SeedableRng};
     use rand_distr::Distribution;
 
@@ -313,6 +372,127 @@ mod tests {
         let sample_mean = total / sample_count as f64;
         let expected_mean = 0.4 + 1.0 / 2.0;
         assert!((sample_mean - expected_mean).abs() < 0.02);
+    }
+
+    #[test]
+    fn lagged_gamma_delay_has_expected_support_mean_and_variance() {
+        for shape in [0.5, 1.0, 2.5] {
+            let rate = 2.0;
+            let lag = 0.4;
+            let kernel =
+                LaggedGammaKernel::new(vec![vec![shape]], vec![vec![rate]], vec![vec![lag]])
+                    .unwrap();
+            let mut rng = rand::rngs::StdRng::seed_from_u64(20261005);
+            let sample_count = 50_000;
+            let mut total = 0.0;
+            let mut total_squared = 0.0;
+
+            for _ in 0..sample_count {
+                let delay = kernel.sample_delay(0, 0, &mut rng);
+                assert!(delay >= lag);
+                total += delay;
+                total_squared += delay * delay;
+            }
+
+            let sample_mean = total / sample_count as f64;
+            let sample_variance = total_squared / sample_count as f64 - sample_mean * sample_mean;
+            assert!((sample_mean - (lag + shape / rate)).abs() < 0.02);
+            assert!((sample_variance - shape / (rate * rate)).abs() < 0.03);
+        }
+    }
+
+    #[test]
+    fn lagged_gamma_delay_has_expected_cdf() {
+        let kernel =
+            LaggedGammaKernel::new(vec![vec![2.0]], vec![vec![2.0]], vec![vec![0.4]])
+                .unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(20261006);
+        let sample_count = 50_000;
+        let thresholds: [f64; 3] = [0.4, 0.9, 1.9];
+        let mut below = [0; 3];
+        for _ in 0..sample_count {
+            let delay = kernel.sample_delay(0, 0, &mut rng);
+            for (idx, &threshold) in thresholds.iter().enumerate() {
+                if delay <= threshold {
+                    below[idx] += 1;
+                }
+            }
+        }
+        for (idx, &threshold) in thresholds.iter().enumerate() {
+            let x = 2.0 * (threshold - 0.4);
+            let expected_cdf = 1.0 - (-x).exp() * (1.0 + x);
+            assert!((below[idx] as f64 / sample_count as f64 - expected_cdf).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn lagged_gamma_uses_parent_child_indices() {
+        let kernel = LaggedGammaKernel::new(
+            vec![vec![1.0, 0.5], vec![2.5, 3.0]],
+            vec![vec![2.0, 3.0], vec![5.0, 7.0]],
+            vec![vec![0.2, 10.0], vec![20.0, 30.0]],
+        )
+        .unwrap();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(47);
+        let mut reference_rng = rng.clone();
+        for (parent, child, shape, rate, lag) in [(0, 1, 0.5, 3.0, 10.0), (1, 0, 2.5, 5.0, 20.0)] {
+            for _ in 0..100 {
+                let expected = lag
+                    + rand_distr::Gamma::new(shape, 1.0 / rate)
+                        .unwrap()
+                        .sample(&mut reference_rng);
+                assert_eq!(kernel.sample_delay(parent, child, &mut rng), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn zero_lag_gamma_matches_gamma_random_stream() {
+        for shape in [0.5, 1.0, 2.5] {
+            let gamma = GammaKernel::new(vec![vec![shape]], vec![vec![2.0]]);
+            let lagged =
+                LaggedGammaKernel::new(vec![vec![shape]], vec![vec![2.0]], vec![vec![0.0]])
+                    .unwrap();
+            let mut rng_gamma = rand::rngs::StdRng::seed_from_u64(89);
+            let mut rng_lagged = rng_gamma.clone();
+            for _ in 0..500 {
+                assert_eq!(
+                    gamma.sample_delay(0, 0, &mut rng_gamma).to_bits(),
+                    lagged.sample_delay(0, 0, &mut rng_lagged).to_bits()
+                );
+            }
+            assert_eq!(rng_gamma.next_u64(), rng_lagged.next_u64());
+        }
+    }
+
+    #[test]
+    fn lagged_gamma_rejects_invalid_shapes_values_and_dimensions() {
+        let valid = vec![vec![1.0]];
+        for invalid in [vec![], vec![vec![]], vec![vec![1.0, 2.0]], vec![vec![1.0]; 2]] {
+            assert!(LaggedGammaKernel::new(invalid.clone(), valid.clone(), valid.clone()).is_err());
+            assert!(LaggedGammaKernel::new(valid.clone(), invalid.clone(), valid.clone()).is_err());
+            assert!(LaggedGammaKernel::new(valid.clone(), valid.clone(), invalid).is_err());
+        }
+        assert!(LaggedGammaKernel::new(vec![], vec![], vec![]).is_err());
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                LaggedGammaKernel::new(vec![vec![invalid]], valid.clone(), valid.clone()).is_err()
+            );
+            assert!(
+                LaggedGammaKernel::new(valid.clone(), vec![vec![invalid]], valid.clone()).is_err()
+            );
+        }
+        for invalid in [-0.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                LaggedGammaKernel::new(valid.clone(), valid.clone(), vec![vec![invalid]]).is_err()
+            );
+        }
+        let kernel = KernelKind::LaggedGamma(
+            LaggedGammaKernel::new(valid.clone(), valid, vec![vec![0.0]]).unwrap(),
+        );
+        assert!(kernel.validate_dimension(1).is_ok());
+        assert!(kernel.validate_dimension(0).is_err());
+        assert!(kernel.validate_dimension(2).is_err());
     }
 
     #[test]

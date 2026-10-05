@@ -10,8 +10,8 @@ mod simulate;
 use simulate::{simulate_hawkes_branching_with_baseline, ImmigrantSamplingMethod};
 mod kernel;
 use kernel::{
-    ExpKernel, GammaKernel, KernelKind, LaggedExpKernel, LaggedMixedExpKernel, MixedExpKernel,
-    PowerLawKernel,
+    ExpKernel, GammaKernel, KernelKind, LaggedExpKernel, LaggedGammaKernel, LaggedMixedExpKernel,
+    MixedExpKernel, PowerLawKernel,
 };
 
 use rand::rngs::StdRng;
@@ -162,7 +162,7 @@ fn kernel_from_object(py: Python<'_>, obj: PyObject) -> PyResult<KernelKind> {
                 .map(KernelKind::LaggedExponential)
                 .map_err(PyValueError::new_err)
         }
-        "gamma" => {
+        "gamma" | "lagged_gamma" => {
             let shape: Vec<Vec<f64>> = params
                 .get_item("shape")?
                 .ok_or_else(|| PyValueError::new_err("kernel params must include 'shape'"))?
@@ -171,7 +171,17 @@ fn kernel_from_object(py: Python<'_>, obj: PyObject) -> PyResult<KernelKind> {
                 .get_item("rate")?
                 .ok_or_else(|| PyValueError::new_err("kernel params must include 'rate'"))?
                 .extract()?;
-            Ok(KernelKind::Gamma(GammaKernel::new(shape, rate)))
+            if kind == "lagged_gamma" {
+                let tau: Vec<Vec<f64>> = params
+                    .get_item("tau")?
+                    .ok_or_else(|| PyValueError::new_err("kernel params must include 'tau'"))?
+                    .extract()?;
+                LaggedGammaKernel::new(shape, rate, tau)
+                    .map(KernelKind::LaggedGamma)
+                    .map_err(PyValueError::new_err)
+            } else {
+                Ok(KernelKind::Gamma(GammaKernel::new(shape, rate)))
+            }
         }
         "mixed_exponential" | "lagged_mixed_exponential" => {
             let weights: Vec<Vec<Vec<f64>>> = params

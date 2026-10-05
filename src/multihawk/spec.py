@@ -123,6 +123,10 @@ class BaselineSpec:
 class KernelSpec:
     """Specification for triggering kernels.
 
+    ``lagged_gamma`` takes ``shape``, ``rate``, and ``tau`` matrices in
+    ``[parent][child]`` order. Child delays are ``tau + Gamma(shape, 1/rate)``
+    (shape/scale convention), with positive shape and rate and non-negative lag.
+
     ``lagged_mixed_exponential`` takes ``weights``, ``beta``, and ``tau`` in
     ``[parent][child][component]`` order. Weights are normalized within each
     pair; ``beta`` contains positive rates and ``tau`` non-negative lags.
@@ -132,6 +136,7 @@ class KernelSpec:
         "exponential",
         "lagged_exponential",
         "gamma",
+        "lagged_gamma",
         "mixed_exponential",
         "lagged_mixed_exponential",
         "power_law",
@@ -155,6 +160,16 @@ class KernelSpec:
                     "shape": _to_float_matrix(shape),
                     "rate": _to_float_matrix(rate),
                 },
+            }
+
+        if self.kind == "lagged_gamma":
+            required = ("shape", "rate", "tau")
+            if any(name not in self.params for name in required):
+                msg = "KernelSpec for 'lagged_gamma' requires 'shape', 'rate' and 'tau'"
+                raise ValueError(msg)
+            return {
+                "kind": self.kind,
+                "params": {name: _to_float_matrix(self.params[name]) for name in required},
             }
 
         if self.kind in {"mixed_exponential", "lagged_mixed_exponential"}:
